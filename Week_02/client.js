@@ -1,0 +1,265 @@
+const net = require("net");
+const parser = require("./parser.js"); // 引入 parser.js 文件
+
+class Request{
+    constructor(options){
+        this.method = options.method || "GET";
+        this.host = options.host;
+        this.port = options.port || 80;
+        this.path = options.path || "/";
+        this.body = options.body || {};
+        this.headers = options.headers || {};
+
+        if(!this.headers["Content-Type"]) {
+            this.headers["Content-Type"] = "application/x-www-form-urlencoded";
+        }
+        
+        if(this.headers["Content-Type"] === "application/json")
+            this.bodyText = JSON.stringify(this.body);         
+        else if(this.headers["Content-Type"] === "application/x-www-form-urlencoded")
+            this.bodyText = Object.keys(this.body).map(key => `${key}=${encodeURIComponent(this.body[key])}`).join('&');
+        
+        this.headers["Content-Length"] = this.bodyText.length;
+    }
+    
+    send(connection){
+       return new Promise((resolve,reject) => {
+           const parser = new ResponseParser;
+           if(connection) {
+               connection.write(this.toString());               
+           } else {
+               connection = net.createConnection({
+                   host:this.host,
+                   port:this.port
+               },()=>{
+                   connection.write(this.toString());
+               })
+           }
+           connection.on('data',(data)=>{
+               console.log(data.toString()) ;
+               parser.receive(data.toString());
+               if(parser.isFinished) {
+                   resolve(parser.response);
+                   connection.end();
+               }
+           });
+           connection.on('error',(err)=>{
+              reject(err);
+               connection.end();
+           });
+       });
+    }
+    
+    toString(){
+        return `${this.method} ${this.path} HTTP/1.1\r
+${Object.keys(this.headers).map(key => `${key}:${this.headers[key]}`).join('\r\n')}\r
+\r
+${this.bodyText}`
+    }
+}
+
+// 接收 response 文本并且解析
+class ResponseParser{
+    constructor(){
+        this.WAITING_STATUS_LINE = 0;
+        this.WAITING_STATUS_LINE_END = 1;
+        this.WAITING_HEADER_NAME = 2;
+        this.WAITING_HEADER_SPACE = 3;
+        this.WAITING_HEADER_VALUE = 4;
+        this.WAITING_HEADER_LINE_END = 5;
+        this.WAITING_HEADER_BLOCK_END = 6;
+        this.WAITING_BODY = 7;
+        
+        this.current = this.WAITING_STATUS_LINE; // 当前状态
+        this.statusLine = "";
+        this.headers = {};
+        this.headerName = "";
+        this.headerValue = "";
+        this.bodyParser = null;
+        this.statusLineParser = null;
+    }
+    
+    get isFinished() {       
+        return this.bodyParser && this.bodyParser.isFinished;
+    }
+    
+    get response() {        
+        // this.statusLine.match(/HTTP\/1.1 ([0-9]+) ([\s\S]+)/);
+        return {
+            statusCode:this.statusLineParser.statusCode, //RegExp.$1,
+            statusText:this.statusLineParser.statusName, //RegExp.$2,
+            headers: this.headers,
+            body:this.bodyParser.content.join('')
+        }
+    }
+    
+    receive(string){
+        this.statusLineParser = new StatusCodeParser();
+        for(let i=0;i<string.length;i++) {
+            this.receiveChar(string.charAt(i));
+        }
+    }
+    
+    // 状态机的代码
+    receiveChar(char){
+        if(this.current === this.WAITING_STATUS_LINE) {
+            if(char === "\r") {
+                this.current = this.WAITING_STATUS_LINE_END;                
+            } else {
+                this.statusLineParser.receiveChar(char);
+                this.statusLine += char;
+            }
+        } else if(this.current === this.WAITING_STATUS_LINE_END) {
+            if(char === "\n") {
+                this.current = this.WAITING_HEADER_NAME;
+            }
+        } else if(this.current === this.WAITING_HEADER_NAME) {
+            if(char === ":") {
+                this.current = this.WAITING_HEADER_SPACE;
+            } else if(char === "\r") {
+                this.current = this.WAITING_HEADER_BLOCK_END;
+                if(this.headers['Transfer-Encoding'] === 'chunked')
+                    this.bodyParser = new TrunkedBodyParser();
+            } else {
+                this.headerName += char;
+            }
+        } else if(this.current === this.WAITING_HEADER_SPACE) {
+            if(char === " ") {
+                this.current = this.WAITING_HEADER_VALUE;
+            }
+        } else if(this.current === this.WAITING_HEADER_VALUE) {
+             if(char === "\r") {
+                 this.current = this.WAITING_HEADER_LINE_END;
+                 this.headers[this.headerName] = this.headerValue;
+                 this.headerName = "";
+                 this.headerValue = "";
+             } else {
+                 this.headerValue += char;
+             }
+        } else if(this.current === this.WAITING_HEADER_LINE_END) {
+            if(char === "\n") {
+                this.current = this.WAITING_HEADER_NAME;
+            }
+        } else if(this.current === this.WAITING_HEADER_BLOCK_END) {
+            if(char === "\n") {
+                this.current = this.WAITING_BODY;
+            }
+        } else if(this.current === this.WAITING_BODY) {
+            // Response Body 的解析
+            this.bodyParser.receiveChar(char);
+        }
+    }
+}
+
+class TrunkedBodyParser {
+    constructor() {
+        this.WAITING_LENGTH = 0;
+        this.WAITING_LENGTH_LINE_END = 1;
+        this.READING_TRUNK = 2;
+        this.WAITING_NEW_LINE = 3;
+        this.WAITING_NEW_LINE_END = 4;
+        
+        this.length = 0;
+        this.content = [];
+        this.isFinished = false;
+        this.current = this.WAITING_LENGTH;
+    }
+    
+    receiveChar(char) {
+        if(this.current === this.WAITING_LENGTH) {
+            if(char === '\r') {
+                if(this.length === 0) {
+                    this.isFinished = true;
+                }
+                this.current = this.WAITING_LENGTH_LINE_END;                
+            } else {
+                this.length *= 16;
+                this.length += parseInt(char,16);
+            }
+        } else if(this.current === this.WAITING_LENGTH_LINE_END) {
+            if(char === '\n') {
+                this.current = this.READING_TRUNK;
+            }
+        } else if(this.current === this.READING_TRUNK) {
+            this.content.push(char);
+            this.length --;
+            if(this.length === 0) {
+                this.current = this.WAITING_NEW_LINE;
+            }
+        } else if(this.current === this.WAITING_NEW_LINE) {
+            if(char === '\r') {
+                this.current = this.WAITING_NEW_LINE_END;
+            }
+        } else if(this.current === this.WAITING_NEW_LINE_END) {
+            if(char === '\n') {
+                this.current = this.WAITING_LENGTH;
+            }
+        }
+    }
+}
+
+class StatusCodeParser {
+    constructor() {
+        this.WAITING_SPACE = 0;
+        this.WAITING_SPACE_END = 1;
+        this.READING_CODE = 2;
+        this.WAITING_NAME = 3;
+        this.READING_NAME = 4;        
+
+        this.statusCode = '';
+        this.statusName = '';
+        this.spaceCount = 0;       
+        this.current = this.WAITING_SPACE;        
+    }
+
+    receiveChar(char) {
+        if(this.current === this.WAITING_SPACE) {
+             if(char === ' ') {                 
+                 this.current = this.WAITING_SPACE_END;
+             }
+        } else if(this.current === this.WAITING_SPACE_END) {
+            if(char !== ' ') {
+                this.spaceCount ++;
+                if(this.spaceCount === 1) {
+                    this.current = this.READING_CODE;
+                    this.statusCode += char;
+                } else if(this.spaceCount === 2){
+                    this.current = this.READING_NAME;
+                    this.statusName +=char;
+                }
+            }
+        } else if(this.current == this.READING_CODE) {
+            if(char === ' ') {
+                this.current = this.WAITING_SPACE_END;
+            }
+            this.statusCode += char;
+        } else if(this.current == this.READING_NAME) {
+            this.statusName +=char;
+        }
+    }
+}
+
+void async function(){
+    let request = new Request({
+        method:"POST",
+        host:"127.0.0.1",
+        port:"8089",
+        path:"/",
+        headers:{
+            ["X-Foo2"]:"customed"
+        },
+        body:{
+            name:"winter"
+        }
+    });
+    
+    let response = await request.send();
+
+    // 把 body 交给 parser 处理。
+    // 如果是真正的浏览器，会逐段把 body 的内容交给 parser 处理的
+    let dom = parser.parseHTML(response.body);   
+    
+    console.log(JSON.stringify(dom,null,"    "));
+    console.log("");
+   
+}();
