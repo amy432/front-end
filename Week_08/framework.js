@@ -20,8 +20,9 @@ export function createElement(type,attributes, ...children) {
 
 export class Component {
     constructor(type) {
-     
+      
     } 
+ 
     setAttribute(name,value) {
         this.root.setAttribute(name,value);
     }

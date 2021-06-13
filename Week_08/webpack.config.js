@@ -3,19 +3,19 @@ module.exports = {
     module:{
         rules:[
             {               
-                test:/\.js$/,
+                test:/\.js$/,               
                 use:{
                     loader:"babel-loader",
                     options:{
-                        presets:["@babel/preset-env"],
-                        plugins:[
-                            ["@babel/plugin-transform-react-jsx",
-                            {pragma:"createElement"}]
-                        ]
+                        presets: ["@babel/preset-env"],
+                        plugins:[[
+                                "@babel/plugin-transform-react-jsx",
+                                {pragma:"createElement"}
+                            ]]
                     }
                 }
             }
         ]
     },
-    mode: "development" // development:开发模式，product : 生产模式
+    mode: "development"
 };

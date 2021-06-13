@@ -1,8 +1,8 @@
-import { Component, createElement } from "./framework";
+import { Component, createElement } from "./framework.js";
 
-export class Carousel extends Component {
-    constructor() {
-        super();
+class Carousel extends Component {
+    constructor() {   
+        super()   ;
         this.attributes = Object.create(null);
     }
 
